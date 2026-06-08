@@ -1,0 +1,80 @@
+name: CVEarity SBOM Discovery
+
+on:
+  repository_dispatch:
+    types:
+      - cvearity_sbom_scan
+      - cvearity_iac_bom_scan
+      - cvearity_ai_bom_scan
+
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install cdxgen
+        run: npm install -g @cyclonedx/cdxgen
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate and Upload SBOM
+        env:
+          SCAN_ID: ${{ github.event.client_payload.scan_id }}
+          API_URL: ${{ github.event.client_payload.api_url }}
+        run: |
+          pip install requests
+          
+          cat << 'EOF' > cvearity_discovery.py
+          import subprocess
+          import json
+          import os
+          import requests
+          import sys
+
+          def main():
+              scan_id = os.environ.get("SCAN_ID")
+              api_url = os.environ.get("API_URL")
+              output_file = "bom.json"
+              
+              print("Generating SBOM with cdxgen...")
+              subprocess.run(["cdxgen", "-o", output_file, "."], check=True)
+              
+              print("Extracting inventory...")
+              with open(output_file, "r") as f:
+                  sbom = json.load(f)
+                  
+              components = sbom.get("components", [])
+              inventory = []
+              for comp in components:
+                  inventory.append({
+                      "name": comp.get("name"),
+                      "version": comp.get("version"),
+                      "purl": comp.get("purl"),
+                      "supplier": comp.get("supplier", {}).get("name") if isinstance(comp.get("supplier"), dict) else comp.get("supplier"),
+                      "type": comp.get("type"),
+                      "bom_ref": comp.get("bom-ref")
+                  })
+                  
+              print(f"Uploading {len(inventory)} components to {api_url}/api/inventory/upload...")
+              response = requests.post(f"{api_url}/api/inventory/upload", json={
+                  "scan_id": int(scan_id),
+                  "components": inventory
+              })
+              response.raise_for_status()
+              print("Upload successful!")
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          
+          python cvearity_discovery.py
